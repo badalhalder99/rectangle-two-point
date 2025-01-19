@@ -1,16 +1,17 @@
 import { useRef, useState, useEffect } from 'react';
 import * as THREE from 'three';
-import { ARButton } from 'three/addons/webxr/ARButton.js';
+import { ARButton } from 'three/examples/jsm/webxr/ARButton.js';
 
 interface Label {
   div: HTMLDivElement;
   point: THREE.Vector3;
 }
 
-interface Measurement {
+interface Rectangle {
   points: THREE.Vector3[];
-  line: THREE.Line | null;
-  label: Label | null;
+  lines: THREE.Line[];
+  widthLabel: Label | null;
+  heightLabel: Label | null;
 }
 
 export const ARMeasure = () => {
@@ -25,24 +26,28 @@ export const ARMeasure = () => {
     let renderer: THREE.WebGLRenderer;
     let controller: THREE.XRTargetRaySpace;
     let reticle: THREE.Mesh;
-    let hitTestSource: XRHitTestSource | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let hitTestSource: any = null;
     const hitTestSourceRequested = false;
 
-    // Track current measurement
-    let currentMeasurement: Measurement = {
+    // Track height points (first two points)
+    let heightPoints: THREE.Vector3[] = [];
+
+    // Track current rectangle
+    const currentRectangle: Rectangle = {
       points: [],
-      line: null,
-      label: null
+      lines: [],
+      widthLabel: null,
+      heightLabel: null
     };
 
-    // Store completed measurements
-    const measurements: Measurement[] = [];
+    // Store completed rectangles
+    const rectangles: Rectangle[] = [];
 
     const init = async () => {
       scene = new THREE.Scene();
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
 
-      // Add lights
       const ambient = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 2);
       ambient.position.set(0.5, 1, 0.25);
       scene.add(ambient);
@@ -63,7 +68,7 @@ export const ARMeasure = () => {
       const button = ARButton.createButton(renderer, {
         requiredFeatures: ['hit-test'],
         optionalFeatures: ['dom-overlay'],
-        domOverlay: { root: containerRef.current },
+        domOverlay: { root: containerRef.current as HTMLElement },
       });
 
       document.body.appendChild(button);
@@ -84,8 +89,6 @@ export const ARMeasure = () => {
     const createReticle = () => {
       const ring = new THREE.RingGeometry(0.045, 0.05, 32).rotateX(-Math.PI / 2);
       const dot = new THREE.CircleGeometry(0.005, 32).rotateX(-Math.PI / 2);
-
-      // Merge geometries
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.Float32BufferAttribute([
         ...ring.attributes.position.array,
@@ -99,12 +102,12 @@ export const ARMeasure = () => {
       return reticleMesh;
     };
 
-    const createLine = (start: THREE.Vector3) => {
-      const points = [start, start.clone()];
+    const createLine = (start: THREE.Vector3, end: THREE.Vector3) => {
+      const points = [start.clone(), end.clone()];
       const geometry = new THREE.BufferGeometry().setFromPoints(points);
       const material = new THREE.LineBasicMaterial({
         color: 0xffffff,
-        linewidth: 5,
+        linewidth: 12,
         linecap: 'round'
       });
       const line = new THREE.Line(geometry, material);
@@ -112,11 +115,14 @@ export const ARMeasure = () => {
       return line;
     };
 
-    const updateLine = (matrix: THREE.Matrix4, line: THREE.Line) => {
-      const positions = line.geometry.attributes.position.array;
-      positions[3] = matrix.elements[12];
-      positions[4] = matrix.elements[13];
-      positions[5] = matrix.elements[14];
+    const updateLine = (line: THREE.Line, start: THREE.Vector3, end: THREE.Vector3) => {
+      const positions = line.geometry.attributes.position.array as Float32Array;
+      positions[0] = start.x;
+      positions[1] = start.y;
+      positions[2] = start.z;
+      positions[3] = end.x;
+      positions[4] = end.y;
+      positions[5] = end.z;
       line.geometry.attributes.position.needsUpdate = true;
       line.geometry.computeBoundingSphere();
     };
@@ -133,16 +139,65 @@ export const ARMeasure = () => {
       };
     };
 
-    const getCenterPoint = (points: THREE.Vector3[]) => {
-      const line = new THREE.Line3(points[0], points[1]);
-      return line.getCenter(new THREE.Vector3());
+    const getMidpoint = (point1: THREE.Vector3, point2: THREE.Vector3) => {
+      return new THREE.Vector3().addVectors(point1, point2).multiplyScalar(0.5);
     };
 
-    const getDistance = (points: THREE.Vector3[]) => {
-      if (points.length === 2) {
-        return points[0].distanceTo(points[1]);
-      }
-      return 0;
+    const getDistance = (point1: THREE.Vector3, point2: THREE.Vector3) => {
+      return point1.distanceTo(point2);
+    };
+
+    const createRectangle = (basePoint: THREE.Vector3, startPoint: THREE.Vector3) => {
+      if (heightPoints.length !== 2) return;
+
+      const height = heightPoints[1].clone().sub(heightPoints[0]).length();
+      const direction = heightPoints[1].clone().sub(heightPoints[0]).normalize();
+
+      console.log(direction)
+
+      // Calculate the upper point based on the height vector
+      const upperPoint = new THREE.Vector3(
+        basePoint.x,
+        basePoint.y + height,
+        basePoint.z
+      );
+
+      const points = [
+        startPoint.clone(),
+        basePoint.clone(),
+        upperPoint.clone(),
+        new THREE.Vector3(
+          startPoint.x,
+          startPoint.y + height,
+          startPoint.z
+        )
+      ];
+
+      const lines = [
+        createLine(points[0], points[1]),
+        createLine(points[1], points[2]),
+        createLine(points[2], points[3]),
+        createLine(points[3], points[0])
+      ];
+
+      const width = Math.round(getDistance(points[0], points[1]) * 100);
+      const heightInCm = Math.round(height * 100);
+
+      const widthMidpoint = getMidpoint(points[0], points[1]);
+      const heightMidpoint = getMidpoint(points[1], points[2]);
+
+      const widthLabel = createLabel(`Width: ${width} cm`, widthMidpoint);
+      const heightLabel = createLabel(`Height: ${heightInCm} cm`, heightMidpoint);
+
+      const rectangle: Rectangle = {
+        points: points.map(p => p.clone()),
+        lines,
+        widthLabel,
+        heightLabel
+      };
+
+      rectangles.push(rectangle);
+      return rectangle;
     };
 
     const onSelect = () => {
@@ -151,29 +206,33 @@ export const ARMeasure = () => {
       const point = new THREE.Vector3();
       point.setFromMatrixPosition(reticle.matrix);
 
-      // Add point to current measurement
-      currentMeasurement.points.push(point);
+      if (heightPoints.length < 2) {
+        // Setting up height points
+        heightPoints.push(point.clone());
+        if (heightPoints.length === 2) {
+          // Create initial height line
+          createLine(heightPoints[0], heightPoints[1]);
+        }
+      } else {
+        // Create rectangles based on the number of points
+        if (rectangles.length === 0) {
+          // Third point - create first rectangle
+          createRectangle(point, heightPoints[0]);
+        } else if (rectangles.length === 1) {
+          // Fourth point - create rectangle connected to third point
+          const lastRectangle = rectangles[rectangles.length - 1];
+          createRectangle(point, lastRectangle.points[1]);
+        } else if (rectangles.length === 2) {
+          // Fifth point - create two rectangles
+          const lastRectangle = rectangles[rectangles.length - 1];
+          // Create rectangle connected to fourth point
+          createRectangle(point, lastRectangle.points[1]);
+          // Create rectangle connected back to height points
+          createRectangle(point, heightPoints[0]);
 
-      if (currentMeasurement.points.length === 1) {
-        // Start new line
-        currentMeasurement.line = createLine(point);
-      } else if (currentMeasurement.points.length === 2) {
-        // Complete measurement
-        const distance = Math.round(getDistance(currentMeasurement.points) * 100);
-        const centerPoint = getCenterPoint(currentMeasurement.points);
-
-        const label = createLabel(`${distance} cm`, centerPoint);
-        currentMeasurement.label = label;
-
-        // Store completed measurement
-        measurements.push({ ...currentMeasurement });
-
-        // Reset current measurement
-        currentMeasurement = {
-          points: [],
-          line: null,
-          label: null
-        };
+          // Reset for new measurements
+          heightPoints = [];
+        }
       }
     };
 
@@ -198,18 +257,23 @@ export const ARMeasure = () => {
     const animate = () => {
       renderer.setAnimationLoop(render);
     };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const render = (timestamp: number | null, frame: any) => {
+      console.log(timestamp);
 
-    const render = (timestamp: number | null, frame: XRFrame | null) => {
       if (frame) {
         const referenceSpace = renderer.xr.getReferenceSpace();
-        const session = renderer.xr.getSession();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const session:any = renderer.xr.getSession();
 
         if (session && !hitTestSourceRequested) {
-          session.requestReferenceSpace('viewer').then((refSpace) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          session.requestReferenceSpace('viewer').then((refSpace:any) => {
             if (session.requestHitTestSource) {
               session
                 .requestHitTestSource({ space: refSpace })
-                .then((source) => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                .then((source:any) => {
                   hitTestSource = source;
                 });
             }
@@ -227,9 +291,18 @@ export const ARMeasure = () => {
               reticle.visible = true;
               reticle.matrix.fromArray(pose.transform.matrix);
 
-              // Update current line if it exists
-              if (currentMeasurement.line) {
-                updateLine(reticle.matrix, currentMeasurement.line);
+              // Show preview line for height points
+              if (heightPoints.length === 1) {
+                const previewPoint = new THREE.Vector3();
+                previewPoint.setFromMatrixPosition(reticle.matrix);
+
+                if (currentRectangle.lines.length > 0) {
+                  const lastLine = currentRectangle.lines[currentRectangle.lines.length - 1];
+                  updateLine(lastLine, heightPoints[0], previewPoint);
+                } else {
+                  const line = createLine(heightPoints[0], previewPoint);
+                  currentRectangle.lines.push(line);
+                }
               }
             }
           } else {
@@ -238,10 +311,9 @@ export const ARMeasure = () => {
         }
 
         // Update all labels
-        const allLabels = [
-          ...measurements.map(m => m.label).filter(Boolean),
-          currentMeasurement.label
-        ].filter(Boolean) as Label[];
+        const allLabels = rectangles.flatMap(rect =>
+          [rect.widthLabel, rect.heightLabel].filter(Boolean)
+        ) as Label[];
 
         allLabels.forEach((label) => {
           const camera3D = renderer.xr.getCamera();
@@ -261,10 +333,9 @@ export const ARMeasure = () => {
       scene?.clear();
 
       // Remove all labels
-      const allLabels = [
-        ...measurements.map(m => m.label).filter(Boolean),
-        currentMeasurement.label
-      ].filter(Boolean) as Label[];
+      const allLabels = rectangles.flatMap(rect =>
+        [rect.widthLabel, rect.heightLabel].filter(Boolean)
+      ) as Label[];
 
       allLabels.forEach((label) => label.div.remove());
 
