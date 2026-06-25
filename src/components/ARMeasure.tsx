@@ -26,22 +26,23 @@ export const ARMeasure = () => {
     let renderer: THREE.WebGLRenderer;
     let controller: THREE.XRTargetRaySpace;
     let reticle: THREE.Mesh;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let hitTestSource: any = null;
     const hitTestSourceRequested = false;
 
-    // Track height points (first two points)
+    // The first two taps define the height (a reference vector + line).
     let heightPoints: THREE.Vector3[] = [];
+    let heightVector: THREE.Vector3 | null = null;
 
-    // Track current rectangle
-    const currentRectangle: Rectangle = {
-      points: [],
-      lines: [],
-      widthLabel: null,
-      heightLabel: null
-    };
+    // Base corners of the shape currently being drawn.
+    // firstBasePoint is the bottom of the height line; the loop closes back to it.
+    let firstBasePoint: THREE.Vector3 | null = null;
+    let lastBasePoint: THREE.Vector3 | null = null;
+    let wallCount = 0;
 
-    // Store completed rectangles
+    // A single reusable line that previews the segment the next tap will create.
+    let previewLine: THREE.Line | null = null;
+
+    // Store completed walls.
     const rectangles: Rectangle[] = [];
 
     const init = async () => {
@@ -147,50 +148,36 @@ export const ARMeasure = () => {
       return point1.distanceTo(point2);
     };
 
-    const createRectangle = (basePoint: THREE.Vector3, startPoint: THREE.Vector3) => {
-      if (heightPoints.length !== 2) return;
+    // Build a rectangle (wall) between two base corners, extruded upward by the
+    // shared height vector. Each wall labels its own width and height.
+    const createWall = (baseStart: THREE.Vector3, baseEnd: THREE.Vector3) => {
+      if (!heightVector) return;
 
-      const height = heightPoints[1].clone().sub(heightPoints[0]).length();
-      const direction = heightPoints[1].clone().sub(heightPoints[0]).normalize();
-
-      console.log(direction)
-
-      // Calculate the upper point based on the height vector
-      const upperPoint = new THREE.Vector3(
-        basePoint.x,
-        basePoint.y + height,
-        basePoint.z
-      );
+      const topStart = baseStart.clone().add(heightVector);
+      const topEnd = baseEnd.clone().add(heightVector);
 
       const points = [
-        startPoint.clone(),
-        basePoint.clone(),
-        upperPoint.clone(),
-        new THREE.Vector3(
-          startPoint.x,
-          startPoint.y + height,
-          startPoint.z
-        )
+        baseStart.clone(),  // bottom-start
+        baseEnd.clone(),    // bottom-end
+        topEnd.clone(),     // top-end
+        topStart.clone()    // top-start
       ];
 
       const lines = [
-        createLine(points[0], points[1]),
-        createLine(points[1], points[2]),
-        createLine(points[2], points[3]),
-        createLine(points[3], points[0])
+        createLine(points[0], points[1]),  // bottom edge (width)
+        createLine(points[1], points[2]),  // far vertical edge (height)
+        createLine(points[2], points[3]),  // top edge
+        createLine(points[3], points[0])   // near vertical edge (height)
       ];
 
-      const width = Math.round(getDistance(points[0], points[1]) * 100);
-      const heightInCm = Math.round(height * 100);
+      const widthCm = Math.round(getDistance(baseStart, baseEnd) * 100);
+      const heightCm = Math.round(heightVector.length() * 100);
 
-      const widthMidpoint = getMidpoint(points[0], points[1]);
-      const heightMidpoint = getMidpoint(points[1], points[2]);
-
-      const widthLabel = createLabel(`Width: ${width} cm`, widthMidpoint);
-      const heightLabel = createLabel(`Height: ${heightInCm} cm`, heightMidpoint);
+      const widthLabel = createLabel(`Width: ${widthCm} cm`, getMidpoint(points[0], points[1]));
+      const heightLabel = createLabel(`Height: ${heightCm} cm`, getMidpoint(points[1], points[2]));
 
       const rectangle: Rectangle = {
-        points: points.map(p => p.clone()),
+        points,
         lines,
         widthLabel,
         heightLabel
@@ -200,39 +187,54 @@ export const ARMeasure = () => {
       return rectangle;
     };
 
+    // Clear the in-progress shape state so a brand new height can be set.
+    const resetShape = () => {
+      heightPoints = [];
+      heightVector = null;
+      firstBasePoint = null;
+      lastBasePoint = null;
+      wallCount = 0;
+      if (previewLine) {
+        scene.remove(previewLine);
+        previewLine.geometry.dispose();
+        previewLine = null;
+      }
+    };
+
     const onSelect = () => {
       if (!reticle.visible) return;
 
       const point = new THREE.Vector3();
       point.setFromMatrixPosition(reticle.matrix);
 
+      // Phase 1: the first two taps set the height.
       if (heightPoints.length < 2) {
-        // Setting up height points
         heightPoints.push(point.clone());
-        if (heightPoints.length === 2) {
-          // Create initial height line
-          createLine(heightPoints[0], heightPoints[1]);
-        }
-      } else {
-        // Create rectangles based on the number of points
-        if (rectangles.length === 0) {
-          // Third point - create first rectangle
-          createRectangle(point, heightPoints[0]);
-        } else if (rectangles.length === 1) {
-          // Fourth point - create rectangle connected to third point
-          const lastRectangle = rectangles[rectangles.length - 1];
-          createRectangle(point, lastRectangle.points[1]);
-        } else if (rectangles.length === 2) {
-          // Fifth point - create two rectangles
-          const lastRectangle = rectangles[rectangles.length - 1];
-          // Create rectangle connected to fourth point
-          createRectangle(point, lastRectangle.points[1]);
-          // Create rectangle connected back to height points
-          createRectangle(point, heightPoints[0]);
 
-          // Reset for new measurements
-          heightPoints = [];
+        if (heightPoints.length === 2) {
+          heightVector = heightPoints[1].clone().sub(heightPoints[0]);
+          // Persist the height line itself.
+          createLine(heightPoints[0], heightPoints[1]);
+          // The bottom of the height line is the first base corner; the loop
+          // will eventually close back to it.
+          firstBasePoint = heightPoints[0].clone();
+          lastBasePoint = heightPoints[0].clone();
+          wallCount = 0;
         }
+        return;
+      }
+
+      // Phase 2: every further tap drops a base corner and draws a wall from the
+      // previous corner to it.
+      createWall(lastBasePoint!, point);
+      lastBasePoint = point.clone();
+      wallCount++;
+
+      // After the 3rd base corner (the 5th tap overall), automatically close the
+      // loop back to the first corner and finish this shape.
+      if (wallCount === 3) {
+        createWall(lastBasePoint!, firstBasePoint!);
+        resetShape();
       }
     };
 
@@ -257,23 +259,18 @@ export const ARMeasure = () => {
     const animate = () => {
       renderer.setAnimationLoop(render);
     };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const render = (timestamp: number | null, frame: any) => {
-      console.log(timestamp);
 
+    const render = (_timestamp: number | null, frame: any) => {
       if (frame) {
         const referenceSpace = renderer.xr.getReferenceSpace();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const session:any = renderer.xr.getSession();
+        const session: any = renderer.xr.getSession();
 
         if (session && !hitTestSourceRequested) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          session.requestReferenceSpace('viewer').then((refSpace:any) => {
+          session.requestReferenceSpace('viewer').then((refSpace: any) => {
             if (session.requestHitTestSource) {
               session
                 .requestHitTestSource({ space: refSpace })
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                .then((source:any) => {
+                .then((source: any) => {
                   hitTestSource = source;
                 });
             }
@@ -291,17 +288,24 @@ export const ARMeasure = () => {
               reticle.visible = true;
               reticle.matrix.fromArray(pose.transform.matrix);
 
-              // Show preview line for height points
-              if (heightPoints.length === 1) {
-                const previewPoint = new THREE.Vector3();
-                previewPoint.setFromMatrixPosition(reticle.matrix);
+              // Preview the segment the next tap will create.
+              const previewPoint = new THREE.Vector3();
+              previewPoint.setFromMatrixPosition(reticle.matrix);
 
-                if (currentRectangle.lines.length > 0) {
-                  const lastLine = currentRectangle.lines[currentRectangle.lines.length - 1];
-                  updateLine(lastLine, heightPoints[0], previewPoint);
+              let previewStart: THREE.Vector3 | null = null;
+              if (heightPoints.length === 1) {
+                // Drawing the height line.
+                previewStart = heightPoints[0];
+              } else if (heightVector && lastBasePoint && wallCount < 3) {
+                // Drawing the next wall's base edge.
+                previewStart = lastBasePoint;
+              }
+
+              if (previewStart) {
+                if (previewLine) {
+                  updateLine(previewLine, previewStart, previewPoint);
                 } else {
-                  const line = createLine(heightPoints[0], previewPoint);
-                  currentRectangle.lines.push(line);
+                  previewLine = createLine(previewStart, previewPoint);
                 }
               }
             }
@@ -310,7 +314,7 @@ export const ARMeasure = () => {
           }
         }
 
-        // Update all labels
+        // Keep all labels glued to their 3D anchor points on screen.
         const allLabels = rectangles.flatMap(rect =>
           [rect.widthLabel, rect.heightLabel].filter(Boolean)
         ) as Label[];
