@@ -39,8 +39,8 @@ export const ARMeasure = () => {
     let lastBasePoint: THREE.Vector3 | null = null;
     let wallCount = 0;
 
-    // A single reusable line that previews the segment the next tap will create.
-    let previewLine: THREE.Line | null = null;
+    // Reusable lines that preview the wall the next tap will create.
+    let previewLines: THREE.Line[] = [];
 
     // Store completed walls.
     const rectangles: Rectangle[] = [];
@@ -187,6 +187,30 @@ export const ARMeasure = () => {
       return rectangle;
     };
 
+    // Draw the given segments using the pool of preview lines, growing the pool
+    // as needed and hiding any leftovers from a previous frame.
+    const updatePreview = (segments: Array<[THREE.Vector3, THREE.Vector3]>) => {
+      while (previewLines.length < segments.length) {
+        previewLines.push(createLine(new THREE.Vector3(), new THREE.Vector3()));
+      }
+      previewLines.forEach((line, i) => {
+        if (i < segments.length) {
+          line.visible = true;
+          updateLine(line, segments[i][0], segments[i][1]);
+        } else {
+          line.visible = false;
+        }
+      });
+    };
+
+    const clearPreview = () => {
+      previewLines.forEach((line) => {
+        scene.remove(line);
+        line.geometry.dispose();
+      });
+      previewLines = [];
+    };
+
     // Clear the in-progress shape state so a brand new height can be set.
     const resetShape = () => {
       heightPoints = [];
@@ -194,11 +218,7 @@ export const ARMeasure = () => {
       firstBasePoint = null;
       lastBasePoint = null;
       wallCount = 0;
-      if (previewLine) {
-        scene.remove(previewLine);
-        previewLine.geometry.dispose();
-        previewLine = null;
-      }
+      clearPreview();
     };
 
     const onSelect = () => {
@@ -288,25 +308,28 @@ export const ARMeasure = () => {
               reticle.visible = true;
               reticle.matrix.fromArray(pose.transform.matrix);
 
-              // Preview the segment the next tap will create.
+              // Preview what the next tap will create.
               const previewPoint = new THREE.Vector3();
               previewPoint.setFromMatrixPosition(reticle.matrix);
 
-              let previewStart: THREE.Vector3 | null = null;
               if (heightPoints.length === 1) {
-                // Drawing the height line.
-                previewStart = heightPoints[0];
+                // Still drawing the height line: preview a single segment.
+                updatePreview([[heightPoints[0], previewPoint]]);
               } else if (heightVector && lastBasePoint && wallCount < 3) {
-                // Drawing the next wall's base edge.
-                previewStart = lastBasePoint;
-              }
-
-              if (previewStart) {
-                if (previewLine) {
-                  updateLine(previewLine, previewStart, previewPoint);
-                } else {
-                  previewLine = createLine(previewStart, previewPoint);
-                }
+                // Preview the whole next wall (base, both verticals and top).
+                const a = lastBasePoint;
+                const b = previewPoint;
+                const aTop = a.clone().add(heightVector);
+                const bTop = b.clone().add(heightVector);
+                updatePreview([
+                  [a, b],        // bottom edge
+                  [b, bTop],     // far vertical
+                  [bTop, aTop],  // top edge
+                  [aTop, a],     // near vertical
+                ]);
+              } else {
+                // Nothing to preview yet (e.g. waiting for the first tap).
+                updatePreview([]);
               }
             }
           } else {
